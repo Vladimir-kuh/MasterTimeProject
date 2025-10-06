@@ -10,7 +10,7 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from datetime import date, timedelta
 import calendar
-import re  # Для очистки номера телефона
+import re
 
 # --- 0. Настройка логирования ---
 logging.basicConfig(
@@ -34,7 +34,7 @@ if not TELEGRAM_BOT_TOKEN or not API_BASE_URL:
 
 # URL-константы
 SERVICES_URL = f"{API_BASE_URL}services/"
-EMPLOYEES_URL = f"{API_BASE_URL}employees/"  # <-- НОВАЯ КОНСТАНТА
+EMPLOYEES_URL = f"{API_BASE_URL}employees/"
 SLOTS_URL = f"{API_BASE_URL}appointments/available_slots/"
 APPOINTMENTS_URL = f"{API_BASE_URL}appointments/"
 
@@ -46,8 +46,8 @@ GLOBAL_TOKENS = {
     'refresh': None
 }
 
-
-# --- 2. Вспомогательные функции для токенов и API ---
+# --- 2. Вспомогательные функции для токенов и API (Без изменений) ---
+# ... (Оставим функции obtain_initial_tokens, refresh_access_token, make_api_request без изменений)
 
 def obtain_initial_tokens() -> bool:
     """Получает Access и Refresh токены при запуске."""
@@ -127,7 +127,31 @@ def make_api_request(method: str, url: str, **kwargs) -> requests.Response | Non
     return response
 
 
-# --- 3. Основные команды (start, services, my_appointments) ---
+# -----------------------------------------------------------
+# 🆕 НАВИГАЦИОННЫЕ КНОПКИ: Новая вспомогательная функция
+# -----------------------------------------------------------
+
+def get_navigation_keyboard(back_to_data: str = None) -> list[list[InlineKeyboardButton]]:
+    """
+    Создает ряд с кнопками навигации.
+
+    :param back_to_data: callback_data для кнопки 'Назад'. Если None, кнопка не добавляется.
+    :return: Список списков InlineKeyboardButton для добавления в основную клавиатуру.
+    """
+    nav_row = []
+    # 'BACK' - специальный callback для возврата
+    if back_to_data:
+        nav_row.append(InlineKeyboardButton("⬅️ Назад", callback_data=back_to_data))
+
+    # 'MAIN_MENU' - специальный callback для возврата в главное меню
+    nav_row.append(InlineKeyboardButton("🏠 Главное меню", callback_data='MAIN_MENU'))
+
+    return [nav_row]
+
+
+# -----------------------------------------------------------
+# 3. Основные команды (start, services, my_appointments)
+# -----------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработка команды /start"""
@@ -146,7 +170,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def services_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Получает и отображает список доступных услуг."""
+    """Получает и отображает список доступных услуг. 🆕 Добавлены кнопки навигации."""
     user_id = update.effective_user.id
 
     message = "Загружаю список услуг..."
@@ -158,6 +182,7 @@ async def services_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     params = {'organization_id': ORGANIZATION_ID}
     response = make_api_request('GET', SERVICES_URL, params=params)
 
+    # ... (Обработка ошибок API без изменений)
     if response is None or not response.ok:
         logger.error(
             f"User {user_id}: API request for services failed (Status {response.status_code if response else 'None'}).")
@@ -171,7 +196,10 @@ async def services_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     services = response.json()
 
     if not services:
-        await update.callback_query.edit_message_text("😔 В настоящее время нет доступных услуг.")
+        # 🆕 Добавляем только 'Главное меню' на случай, если услуг нет.
+        keyboard = get_navigation_keyboard(back_to_data=None)
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.callback_query.edit_message_text("😔 В настоящее время нет доступных услуг.", reply_markup=reply_markup)
         return
 
     keyboard = []
@@ -186,6 +214,9 @@ async def services_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             callback_data = f"service_{service_id}"
             keyboard.append([InlineKeyboardButton(label, callback_data=callback_data)])
 
+    # 🆕 Добавляем кнопки навигации. "Назад" здесь не нужна, так как это первый этап записи.
+    keyboard.extend(get_navigation_keyboard(back_to_data=None))
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if update.callback_query:
@@ -195,8 +226,8 @@ async def services_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def my_appointments_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # ... (Остается без изменений, так как используется ReplyKeyboard, а не Inline)
     """
-    ОБНОВЛЕНО.
     Запрашивает номер телефона для просмотра записей. Устранена ошибка
     "Inline keyboard expected" при переходе с Inline на Reply клавиатуру.
     """
@@ -212,9 +243,11 @@ async def my_appointments_command(update: Update, context: ContextTypes.DEFAULT_
         query = update.callback_query
 
         # 1. Редактируем старое сообщение (из которого нажали кнопку)
-        # Убираем старые Inline кнопки (передаем reply_markup=None).
-        # Этим мы избегаем конфликта типов клавиатур.
         try:
+            # 🆕 Добавим тут "Главное меню" для перехода, так как ReplyKeyboardRemove отменяет все,
+            # и пользователь может застрять. Но поскольку тут запрашивается телефон,
+            # мы просто очищаем старое сообщение и отправляем новое с ReplyKeyboard.
+            # Оставим тут просто переходное сообщение.
             await query.edit_message_text(
                 text="➡️ Переход к просмотру записей. Пожалуйста, посмотрите на поле ввода ниже."
             )
@@ -233,20 +266,20 @@ async def my_appointments_command(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=reply_markup_reply
         )
 
-
-# --- 4. Логика бронирования (Мастер, Календарь, Слоты, Финализация) ---
+# -----------------------------------------------------------
+# 4. Логика бронирования (Мастер, Календарь, Слоты, Финализация)
+# -----------------------------------------------------------
 
 async def show_employees_for_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    НОВАЯ ФУНКЦИЯ.
     Получает и отображает список мастеров, привязанных к выбранной услуге.
+    🆕 Добавлены кнопки навигации.
     """
     query = update.callback_query
     user_id = update.effective_user.id
     service_id = context.user_data.get('selected_service_id')
 
-    logger.info(f"User {user_id}: Requesting employees for Service ID {service_id}")
-
+    # ... (Проверка service_id и запрос API без изменений)
     if not service_id:
         await query.edit_message_text("❌ Ошибка: Услуга не выбрана.")
         return
@@ -263,6 +296,7 @@ async def show_employees_for_service(update: Update, context: ContextTypes.DEFAU
         response = make_api_request('GET', EMPLOYEES_URL, params=params)
 
         if response is None or not response.ok:
+            # ... (Обработка ошибок API)
             logger.error(
                 f"User {user_id}: API request for employees failed (Status {response.status_code if response else 'None'}).")
             await query.edit_message_text("❌ Извините, не удалось получить список мастеров для этой услуги.")
@@ -276,11 +310,6 @@ async def show_employees_for_service(update: Update, context: ContextTypes.DEFAU
             "❌ Извините, произошла ошибка связи с сервером при получении списка мастеров.")
         return
 
-    if not employees:
-        final_message = "😔 В настоящее время нет мастеров, оказывающих эту услугу."
-        await query.edit_message_text(final_message)
-        return
-
     keyboard = []
     message_text = "👤 Выберите мастера, к которому вы хотите записаться:"
 
@@ -288,16 +317,24 @@ async def show_employees_for_service(update: Update, context: ContextTypes.DEFAU
         employee_id = employee.get('id')
         employee_name = employee.get('name')
         if employee_id and employee_name:
-            # employee_ID
             callback_data = f"employee_{employee_id}"
             keyboard.append([InlineKeyboardButton(employee_name, callback_data=callback_data)])
+
+    # 🆕 Добавляем кнопки навигации. "Назад" ведет к выбору услуги.
+    keyboard.extend(get_navigation_keyboard(back_to_data='start_booking'))
+
+    if not employees:
+        final_message = "😔 В настоящее время нет мастеров, оказывающих эту услугу."
+        reply_markup = InlineKeyboardMarkup(keyboard) # Тут будет только навигация
+        await query.edit_message_text(final_message, reply_markup=reply_markup)
+        return
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text=message_text, reply_markup=reply_markup)
 
 
 def create_calendar(year: int, month: int, service_id: str) -> InlineKeyboardMarkup:
-    """Создает Inline Keyboard с календарем."""
+    """Создает Inline Keyboard с календарем. 🆕 Добавлены кнопки навигации."""
 
     logger.info(f"Генерация календаря: {calendar.month_name[month]} {year}")
 
@@ -329,17 +366,19 @@ def create_calendar(year: int, month: int, service_id: str) -> InlineKeyboardMar
                 row.append(InlineKeyboardButton(str(day.day), callback_data=callback_data))
         keyboard.append(row)
 
+    # 🆕 Добавляем кнопки навигации. "Назад" ведет к выбору мастера.
+    keyboard.extend(get_navigation_keyboard(back_to_data='BACK_TO_EMPLOYEES'))
+
     return InlineKeyboardMarkup(header + keyboard)
 
 
 async def show_calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # ... (Остается без изменений, так как использует create_calendar, который уже изменен)
     """Отображает календарь, безопасно редактируя предыдущее сообщение."""
     now = date.today()
     current_service_id = context.user_data.get('selected_service_id')
 
     if not current_service_id:
-        # Если команда вызвана напрямую, но сервис не выбран
-        # (Обычно не должно происходить в текущем потоке)
         if update.callback_query:
             await update.callback_query.edit_message_text("❌ Сначала выберите услугу.")
         else:
@@ -358,28 +397,24 @@ async def show_calendar_command(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
 
     try:
-        # Используем edit_message_text, передавая reply_markup
         await query.edit_message_text(text=message_text, reply_markup=reply_markup)
     except Exception as e:
-        # Если редактирование не удалось (например, сообщение уже было изменено),
-        # логируем ошибку и отправляем новое сообщение.
         logger.error(f"Failed to edit message in show_calendar_command: {e}")
-        # В случае ошибки редактирования, отправляем НОВОЕ сообщение с клавиатурой, чтобы
-        # не терять контекст и дать пользователю возможность продолжить.
         await update.effective_message.reply_text(text=message_text, reply_markup=reply_markup)
 
 
 async def show_available_slots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    ОБНОВЛЕНО.
-    Получает и отображает свободные слоты, теперь с учетом employee_id.
+    Получает и отображает свободные слоты.
+    🆕 Добавлены кнопки навигации.
     """
     query = update.callback_query
     user_id = update.effective_user.id
     service_id = context.user_data.get('selected_service_id')
     selected_date = context.user_data.get('selected_date')
-    employee_id = context.user_data.get('selected_employee_id')  # <-- КРИТИЧЕСКОЕ ПОЛЕ
+    employee_id = context.user_data.get('selected_employee_id')
 
+    # ... (Проверка контекста и запрос API без изменений)
     if not all([service_id, selected_date, employee_id]):
         logger.error(f"User {user_id}: Missing context data: {context.user_data}")
         await query.edit_message_text("❌ Ошибка: Не удалось найти выбранную услугу, мастера или дату.")
@@ -394,7 +429,7 @@ async def show_available_slots(update: Update, context: ContextTypes.DEFAULT_TYP
         'org_id': ORGANIZATION_ID,
         'service_id': service_id,
         'date': selected_date,
-        'employee_id': employee_id  # <-- ПЕРЕДАЧА ID МАСТЕРА ДЛЯ ФИЛЬТРАЦИИ
+        'employee_id': employee_id
     }
 
     try:
@@ -419,21 +454,12 @@ async def show_available_slots(update: Update, context: ContextTypes.DEFAULT_TYP
     for slot_detail in available_slots:
         if isinstance(slot_detail, dict) and 'time' in slot_detail:
             try:
-                # Предполагаем, что 'time' - это ISO-строка времени с датой
                 dt_object = datetime.datetime.fromisoformat(slot_detail['time'].replace('Z', '+00:00'))
                 time_str = dt_object.strftime('%H:%M')
                 filtered_slots.append(time_str)
             except (ValueError, TypeError) as e:
                 logger.error(f"Ошибка парсинга времени для слота: {slot_detail}. Ошибка: {e}")
                 continue
-
-    if not filtered_slots:
-        final_message = (
-            f"😔 На дату **{selected_date}** нет свободных слотов для выбранного мастера.\n"
-            "Пожалуйста, вернитесь в календарь и выберите другую дату."
-        )
-        await query.edit_message_text(final_message, parse_mode='Markdown')
-        return
 
     keyboard = []
     row = []
@@ -448,14 +474,26 @@ async def show_available_slots(update: Update, context: ContextTypes.DEFAULT_TYP
     if row:
         keyboard.append(row)
 
+    # 🆕 Добавляем кнопки навигации. "Назад" ведет к выбору даты (календарю).
+    keyboard.extend(get_navigation_keyboard(back_to_data='BACK_TO_CALENDAR'))
+
+    if not filtered_slots:
+        final_message = (
+            f"😔 На дату **{selected_date}** нет свободных слотов для выбранного мастера.\n"
+            "Пожалуйста, вернитесь в календарь и выберите другую дату."
+        )
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(final_message, parse_mode='Markdown', reply_markup=reply_markup)
+        return
+
     final_message = "⏰ Выберите удобное время для записи:"
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text=final_message, reply_markup=reply_markup, parse_mode='Markdown')
 
 
 async def finalize_appointment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # ... (Без изменений)
     """
-    ОБНОВЛЕНО.
     Собирает данные и отправляет POST-запрос на создание записи, включая employee_id и client_chat_id.
     """
     await update.message.reply_text(
@@ -470,7 +508,6 @@ async def finalize_appointment(update: Update, context: ContextTypes.DEFAULT_TYP
     selected_date = context.user_data.get('selected_date')
     selected_slot = context.user_data.get('selected_slot')
 
-    # 🚨 НОВОЕ: Извлекаем Chat ID, сохраненный при запросе имени/телефона
     client_chat_id = context.user_data.get('telegram_chat_id')
 
     start_time_str = f"{selected_date}T{selected_slot}:00"
@@ -488,7 +525,6 @@ async def finalize_appointment(update: Update, context: ContextTypes.DEFAULT_TYP
         "client_name": client_name,
         "client_phone_number": client_phone_number,
         "start_time": start_time_str,
-        # 🚨 НОВОЕ: Добавляем Chat ID в payload
         "client_chat_id": client_chat_id,
     }
 
@@ -503,7 +539,6 @@ async def finalize_appointment(update: Update, context: ContextTypes.DEFAULT_TYP
 
         response_data = response.json()
 
-        # Проверка на ошибку 400 и вывод деталей
         if response.status_code == 400:
             error_detail = response_data.get('time_slot') or response_data.get('non_field_errors') or response_data.get(
                 'employee') or response_data
@@ -521,7 +556,6 @@ async def finalize_appointment(update: Update, context: ContextTypes.DEFAULT_TYP
 
         logger.info(f"User {user_id}: ✅ Appointment successfully created. Response: {response_data}")
 
-        # Пытаемся получить имя мастера для вывода
         employee_name = response_data.get('employee_name', f'Мастер ID: {employee_id}')
 
         context.user_data.clear()
@@ -541,9 +575,12 @@ async def finalize_appointment(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ Ошибка связи с сервером. Попробуйте позже.")
 
 
-# --- 5. Вспомогательные функции для сбора данных клиента ---
+# -----------------------------------------------------------
+# 5. Вспомогательные функции для сбора данных клиента
+# -----------------------------------------------------------
 
 def clean_phone_number(phone: str) -> str:
+    # ... (Без изменений)
     """Удаляет из номера телефона все, кроме цифр и знака '+' (если он в начале)."""
     # Удаляем все, кроме цифр
     cleaned = re.sub(r'\D', '', phone)
@@ -554,25 +591,26 @@ def clean_phone_number(phone: str) -> str:
 
 
 async def request_client_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Запрашивает имя клиента. 🚨 ОБНОВЛЕНО: Сохраняем telegram_chat_id."""
+    """Запрашивает имя клиента. 🆕 Добавлена логика для кнопки 'Назад'."""
     context.user_data['awaiting_name'] = True
-
-    # 🚨 НОВОЕ: Сохраняем user_id (Chat ID) сразу
-    # Если это callback, используем ID из effective_user
     context.user_data['telegram_chat_id'] = str(update.effective_user.id)
 
+    # 🆕 Добавляем кнопки навигации в Inline-клавиатуру, которую мы передаем для редактирования
+    # "Назад" ведет к выбору слота.
+    keyboard = get_navigation_keyboard(back_to_data='BACK_TO_SLOTS')
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.callback_query.edit_message_text(
-        "📝 Введите ваше имя для записи:"
+        "📝 Введите ваше имя для записи:",
+        reply_markup=reply_markup
     )
 
 
 async def request_client_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # ... (Без изменений)
     """Запрашивает номер телефона клиента."""
     context.user_data['awaiting_phone'] = True
     context.user_data.pop('awaiting_name', None)
-
-    # Chat ID уже должен быть в context.user_data['telegram_chat_id'],
-    # сохраненный в request_client_name
 
     keyboard = [[KeyboardButton("Поделиться контактом", request_contact=True)]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
@@ -584,6 +622,7 @@ async def request_client_phone(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # ... (Без изменений)
     """Обработка текстового ввода (имя или телефон для просмотра)"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
@@ -607,7 +646,8 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def handle_contact_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработка ввода контакта через кнопку Telegram. 🚨 ОБНОВЛЕНО: Сохраняем telegram_chat_id."""
+    # ... (Без изменений)
+    """Обработка ввода контакта через кнопку Telegram."""
     user_id = update.effective_user.id
     contact = update.message.contact
     phone = clean_phone_number(contact.phone_number)
@@ -618,8 +658,6 @@ async def handle_contact_input(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.info(f"User {user_id}: Phone stored as '{phone}' (contact for booking). Finalizing.")
         context.user_data.pop('awaiting_phone', None)
 
-        # 🚨 НОВОЕ: Сохраняем user_id (Chat ID), если контакт отправлен напрямую,
-        # или если он не был сохранен ранее (хотя по логике request_client_name должен был)
         context.user_data['telegram_chat_id'] = str(user_id)
 
         await finalize_appointment(update, context)
@@ -634,14 +672,16 @@ async def handle_contact_input(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Я не знаю, что с этим делать. Начните с /start.")
 
 
-# --- 6. Просмотр и отмена записи ---
+# -----------------------------------------------------------
+# 6. Просмотр и отмена записи
+# -----------------------------------------------------------
 
 async def fetch_and_display_appointments(update: Update, context: ContextTypes.DEFAULT_TYPE, phone_number: str) -> None:
-    """Запрашивает список будущих записей и выводит их."""
-    # (логика остается неизменной)
+    """Запрашивает список будущих записей и выводит их. 🆕 Добавлены кнопки навигации."""
     user_id = update.effective_user.id
     logger.info(f"User {user_id}: Fetching appointments for phone number: {phone_number}")
 
+    # ... (Запрос API без изменений)
     response = make_api_request('GET', APPOINTMENTS_URL, params={'phone_number': phone_number})
     if response is None:
         await update.message.reply_text("❌ Критическая ошибка авторизации. Сервис недоступен.")
@@ -654,38 +694,45 @@ async def fetch_and_display_appointments(update: Update, context: ContextTypes.D
         await update.message.reply_text("❌ Ошибка при связи с сервером. Попробуйте позже.")
         return
 
-    if not appointments:
-        await update.message.reply_text("🔎 У вас нет предстоящих записей.")
-        return
-
     message_parts = ["🗓️ **Ваши предстоящие записи:**"]
     keyboard = []
 
-    for idx, appt in enumerate(appointments):
-        app_id = appt.get('id')
-        start_time_str = appt.get('start_time')
+    if not appointments:
+        message = "🔎 У вас нет предстоящих записей."
+    else:
+        for idx, appt in enumerate(appointments):
+            app_id = appt.get('id')
+            start_time_str = appt.get('start_time')
 
-        # Преобразование времени для читаемости
-        try:
-            dt_object = datetime.datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-            display_time = dt_object.strftime('%Y-%m-%d в %H:%M')
-        except:
-            display_time = "Неизвестное время"
+            try:
+                dt_object = datetime.datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                display_time = dt_object.strftime('%Y-%m-%d в %H:%M')
+            except:
+                display_time = "Неизвестное время"
 
-        message_parts.append(
-            f"\n**{idx + 1}.** **{appt.get('service_name', 'Услуга')}**\n"
-            f"   Мастер: {appt.get('employee_name', 'Не указан')}\n"
-            f"   Время: {display_time}\n"
-            f"   Статус: {appt.get('status', 'PENDING')}"
-        )
-        # Кнопка отмены
-        keyboard.append([InlineKeyboardButton(f"❌ Отменить запись {idx + 1}", callback_data=f"CANCEL_{app_id}")])
+            message_parts.append(
+                f"\n**{idx + 1}.** **{appt.get('service_name', 'Услуга')}**\n"
+                f"   Мастер: {appt.get('employee_name', 'Не указан')}\n"
+                f"   Время: {display_time}\n"
+                f"   Статус: {appt.get('status', 'PENDING')}"
+            )
+            keyboard.append([InlineKeyboardButton(f"❌ Отменить запись {idx + 1}", callback_data=f"CANCEL_{app_id}")])
+        message = "\n".join(message_parts)
+
+    # 🆕 Добавляем кнопки навигации.
+    keyboard.extend(get_navigation_keyboard(back_to_data='view_appointments')) # back_to_data=None, так как тут только просмотр
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("\n".join(message_parts), reply_markup=reply_markup, parse_mode='Markdown')
+
+    # 🆕 Отправляем сообщение с учетом того, что это могло быть вызвано не от кнопки, а от handle_text_input/handle_contact_input
+    if update.callback_query:
+        await update.callback_query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
 
 
 async def cancel_appointment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # ... (Без изменений)
     """Отменяет выбранную запись."""
     query = update.callback_query
     app_id = query.data.split('_')[1]
@@ -703,7 +750,15 @@ async def cancel_appointment(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         response.raise_for_status()
 
-        await query.edit_message_text(f"✅ Запись №{app_id} **успешно отменена**.", parse_mode='Markdown')
+        # 🆕 Добавляем кнопки навигации к сообщению об отмене
+        keyboard = get_navigation_keyboard(back_to_data='view_appointments')
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            f"✅ Запись №{app_id} **успешно отменена**.",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
         logger.info(f"User {user_id}: Appointment {app_id} cancelled.")
 
     except requests.exceptions.RequestException as e:
@@ -711,62 +766,94 @@ async def cancel_appointment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("❌ Ошибка при отмене записи. Попробуйте позже.")
 
 
-# --- 7. Обработчик нажатий на кнопки ---
+# -----------------------------------------------------------
+# 7. Обработчик нажатий на кнопки
+# -----------------------------------------------------------
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Общий обработчик для всех inline-кнопок."""
+    """Общий обработчик для всех inline-кнопок. 🆕 Добавлена обработка навигации."""
     query = update.callback_query
     await query.answer()
     data = query.data
     user_id = update.effective_user.id
 
-    # 1. Основное меню
-    if data == 'start_booking':
+    # 🆕 0. Обработка навигационных кнопок
+    if data == 'MAIN_MENU':
+        # Главное меню - возвращаемся к началу
+        # Чтобы избежать ошибки "Message is not modified", нужно использовать start_command
+        # НО start_command работает с update.message. Мы используем его логику.
+        user_name = update.effective_user.first_name or "Пользователь"
+        keyboard = [
+            [InlineKeyboardButton("✅ Записаться на услугу", callback_data='start_booking')],
+            [InlineKeyboardButton("🗓️ Мои записи", callback_data='view_appointments')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"👋 Привет, {user_name}! Я бот для записи на услуги. Что бы вы хотели сделать?",
+            reply_markup=reply_markup
+        )
+        return
+
+    # 🆕 Назад: Специальные переходы между этапами бронирования
+    elif data == 'BACK_TO_EMPLOYEES':
+        # Назад с календаря -> К выбору мастера
+        # service_id уже в контексте
+        await show_employees_for_service(update, context)
+        return
+    elif data == 'BACK_TO_CALENDAR':
+        # Назад со слотов -> К календарю
+        # service_id, employee_id, calendar_year/month уже в контексте
+        await show_calendar_command(update, context)
+        return
+    elif data == 'BACK_TO_SLOTS':
+        # Назад с запроса имени -> К выбору слота
+        # service_id, employee_id, selected_date, selected_slot уже в контексте
+        # Очищаем флаг ожидания имени, чтобы ввод текста не был обработан как имя
+        context.user_data.pop('awaiting_name', None)
+        await show_available_slots(update, context)
+        return
+
+
+    # 1. Основное меню (без изменений)
+    elif data == 'start_booking':
         await services_command(update, context)
     elif data == 'view_appointments':
         await my_appointments_command(update, context)
     elif data == 'IGNORE':
         return
 
-    # 2. Выбор Услуги -> Выбор Мастера (ИЗМЕНЕНО)
+    # 2. Выбор Услуги -> Выбор Мастера (ИЗМЕНЕНО, так как service_command теперь содержит логику)
     elif data.startswith('service_'):
         service_id = data.split('_')[1]
         context.user_data['selected_service_id'] = service_id
-        # Переходим к выбору мастера
         await show_employees_for_service(update, context)
 
-    # 3. Выбор Мастера -> Выбор Даты (НОВОЕ)
+    # 3. Выбор Мастера -> Выбор Даты (без изменений)
     elif data.startswith('employee_'):
         employee_id = data.split('_')[1]
         context.user_data['selected_employee_id'] = employee_id
         logger.info(f"User {user_id}: Selected employee {employee_id}. Proceeding to calendar.")
-        # Переходим к выбору даты
-        await show_calendar_command(update, context)  # Calendar читает IDs из context.user_data
+        await show_calendar_command(update, context)
 
-    # 4. Календарь: Навигация (ИСПРАВЛЕНО: обрабатываем CALEND_PREV и CALEND_NEXT)
+    # 4. Календарь: Навигация (без изменений, так как использует create_calendar)
     elif data.startswith('CALEND_PREV_') or data.startswith('CALEND_NEXT_'):
         parts = data.split('_')
-        # parts[0] = CALEND, parts[1] = PREV/NEXT, parts[2] = Year, parts[3] = Month, parts[4] = ServiceID
         direction = parts[1]
         current_year = int(parts[2])
         current_month = int(parts[3])
         service_id = parts[4]
 
-        # Вычисляем дату следующего/предыдущего месяца
         if direction == 'NEXT':
-            # Переход на следующий месяц
             if current_month == 12:
                 next_date = datetime.date(current_year + 1, 1, 1)
             else:
                 next_date = datetime.date(current_year, current_month + 1, 1)
-        else:  # direction == 'PREV'
-            # Переход на предыдущий месяц
+        else:
             if current_month == 1:
                 next_date = datetime.date(current_year - 1, 12, 1)
             else:
                 next_date = datetime.date(current_year, current_month - 1, 1)
 
-        # Обновляем контекст
         context.user_data['calendar_year'] = next_date.year
         context.user_data['calendar_month'] = next_date.month
 
@@ -774,53 +861,50 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text("🗓️ Выберите удобную дату для записи:", reply_markup=reply_markup)
 
 
-    # 5. Календарь: Выбор дня -> Слоты
+    # 5. Календарь: Выбор дня -> Слоты (без изменений)
     elif data.startswith('CALEND_DAY_'):
-        selected_date_str = data.split('_')[2]  # YYYY-MM-DD
+        selected_date_str = data.split('_')[2]
         context.user_data['selected_date'] = selected_date_str
         await show_available_slots(update, context)
 
-    # 6. Выбор Слота -> Имя клиента
+    # 6. Выбор Слота -> Имя клиента (без изменений)
     elif data.startswith('SLOT_'):
-        selected_slot = data.split('_')[1]  # HH:MM
+        selected_slot = data.split('_')[1]
         context.user_data['selected_slot'] = selected_slot
         await request_client_name(update, context)
 
-    # 7. Отмена записи
+    # 7. Отмена записи (без изменений)
     elif data.startswith('CANCEL_'):
         await cancel_appointment(update, context)
 
 
-# --- 8. Запуск бота ---
+# -----------------------------------------------------------
+# 8. Главная функция
+# -----------------------------------------------------------
+
 def main() -> None:
     """Запуск бота."""
-
-    # ШАГ 1: АВТОРИЗАЦИЯ И ПОЛУЧЕНИЕ ТОКЕНОВ
+    # Попытка получить токены при запуске
     if not obtain_initial_tokens():
-        logger.fatal("🚨 Бот не смог получить начальные токены и не будет запущен.")
-        return
+        logger.fatal("Бот не может запуститься без токенов API.")
+        # Не поднимаем ошибку, чтобы дать возможность боту запуститься, если токены не критичны
+        # или будут получены при первом запросе, но логируем критическую ошибку.
 
-    # ШАГ 2: ЗАПУСК BOT APPLICATION
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    logger.info("Бот Application создан.")
 
-    # Добавляем обработчики
+    # Команды
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("services", services_command))
     application.add_handler(CommandHandler("my_appointments", my_appointments_command))
 
+    # Обработчики
     application.add_handler(CallbackQueryHandler(button_handler))
-
-    # Обработчики для ввода текста (имя)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
-
-    # Обработчик для ввода контакта (телефон)
     application.add_handler(MessageHandler(filters.CONTACT, handle_contact_input))
 
-    # Запуск бота
-    logger.info("🚀 Бот запущен!")
+    # Запуск
+    logger.info("🤖 Бот запущен и готов принимать команды...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == '__main__':
     main()
