@@ -195,18 +195,43 @@ async def services_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def my_appointments_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Запрашивает номер телефона для просмотра записей."""
+    """
+    ОБНОВЛЕНО.
+    Запрашивает номер телефона для просмотра записей. Устранена ошибка
+    "Inline keyboard expected" при переходе с Inline на Reply клавиатуру.
+    """
 
     context.user_data['awaiting_phone_for_view'] = True
 
     keyboard = [[KeyboardButton("Поделиться контактом", request_contact=True)]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+    reply_markup_reply = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
 
     message = "📞 Чтобы просмотреть ваши записи, пожалуйста, отправьте свой номер телефона."
+
     if update.callback_query:
-        await update.callback_query.edit_message_text(message, reply_markup=reply_markup)
+        query = update.callback_query
+
+        # 1. Редактируем старое сообщение (из которого нажали кнопку)
+        # Убираем старые Inline кнопки (передаем reply_markup=None).
+        # Этим мы избегаем конфликта типов клавиатур.
+        try:
+            await query.edit_message_text(
+                text="➡️ Переход к просмотру записей. Пожалуйста, посмотрите на поле ввода ниже."
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отредактировать сообщение после callback'а 'Мои записи': {e}")
+
+        # 2. Отправляем НОВОЕ сообщение с ReplyKeyboardMarkup (которая появится внизу).
+        await update.effective_chat.send_message(
+            message,
+            reply_markup=reply_markup_reply
+        )
     else:
-        await update.message.reply_text(message, reply_markup=reply_markup)
+        # Если команда вызвана через /my_appointments, просто отправляем новое сообщение.
+        await update.message.reply_text(
+            message,
+            reply_markup=reply_markup_reply
+        )
 
 
 # --- 4. Логика бронирования (Мастер, Календарь, Слоты, Финализация) ---
@@ -339,6 +364,8 @@ async def show_calendar_command(update: Update, context: ContextTypes.DEFAULT_TY
         # Если редактирование не удалось (например, сообщение уже было изменено),
         # логируем ошибку и отправляем новое сообщение.
         logger.error(f"Failed to edit message in show_calendar_command: {e}")
+        # В случае ошибки редактирования, отправляем НОВОЕ сообщение с клавиатурой, чтобы
+        # не терять контекст и дать пользователю возможность продолжить.
         await update.effective_message.reply_text(text=message_text, reply_markup=reply_markup)
 
 
@@ -697,25 +724,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Переходим к выбору даты
         await show_calendar_command(update, context)  # Calendar читает IDs из context.user_data
 
-    # 4. Календарь: Навигация
-    elif data.startswith('CALEND_NAV_'):
+    # 4. Календарь: Навигация (ИСПРАВЛЕНО: обрабатываем CALEND_PREV и CALEND_NEXT)
+    elif data.startswith('CALEND_PREV_') or data.startswith('CALEND_NEXT_'):
         parts = data.split('_')
-        direction, current_year, current_month, service_id = parts[2], int(parts[3]), int(parts[4]), parts[5]
+        # parts[0] = CALEND, parts[1] = PREV/NEXT, parts[2] = Year, parts[3] = Month, parts[4] = ServiceID
+        direction = parts[1]
+        current_year = int(parts[2])
+        current_month = int(parts[3])
+        service_id = parts[4]
 
-        target_date = datetime.date(current_year, current_month, 1)
+        # Вычисляем дату следующего/предыдущего месяца
         if direction == 'NEXT':
             # Переход на следующий месяц
             if current_month == 12:
                 next_date = datetime.date(current_year + 1, 1, 1)
             else:
                 next_date = datetime.date(current_year, current_month + 1, 1)
-        elif direction == 'PREV':
+        else:  # direction == 'PREV'
             # Переход на предыдущий месяц
             if current_month == 1:
                 next_date = datetime.date(current_year - 1, 12, 1)
             else:
                 next_date = datetime.date(current_year, current_month - 1, 1)
 
+        # Обновляем контекст
         context.user_data['calendar_year'] = next_date.year
         context.user_data['calendar_month'] = next_date.month
 
