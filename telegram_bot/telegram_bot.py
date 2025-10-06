@@ -456,7 +456,7 @@ async def show_available_slots(update: Update, context: ContextTypes.DEFAULT_TYP
 async def finalize_appointment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     ОБНОВЛЕНО.
-    Собирает данные и отправляет POST-запрос на создание записи, включая employee_id.
+    Собирает данные и отправляет POST-запрос на создание записи, включая employee_id и client_chat_id.
     """
     await update.message.reply_text(
         "Спасибо! Отправляю вашу запись на сервер...",
@@ -466,13 +466,16 @@ async def finalize_appointment(update: Update, context: ContextTypes.DEFAULT_TYP
     client_name = context.user_data.get('client_name')
     client_phone_number = context.user_data.get('client_phone_number')
     service_id = context.user_data.get('selected_service_id')
-    employee_id = context.user_data.get('selected_employee_id')  # <-- КРИТИЧЕСКОЕ ПОЛЕ
+    employee_id = context.user_data.get('selected_employee_id')
     selected_date = context.user_data.get('selected_date')
     selected_slot = context.user_data.get('selected_slot')
 
+    # 🚨 НОВОЕ: Извлекаем Chat ID, сохраненный при запросе имени/телефона
+    client_chat_id = context.user_data.get('telegram_chat_id')
+
     start_time_str = f"{selected_date}T{selected_slot}:00"
 
-    if not all([client_name, client_phone_number, service_id, employee_id, start_time_str]):
+    if not all([client_name, client_phone_number, service_id, employee_id, start_time_str, client_chat_id]):
         logger.error(f"User {user_id}: Finalization failed due to missing data: {context.user_data}")
         await update.message.reply_text("❌ Критическая ошибка данных: Пожалуйста, начните запись сначала (/start).")
         context.user_data.clear()
@@ -481,10 +484,12 @@ async def finalize_appointment(update: Update, context: ContextTypes.DEFAULT_TYP
     payload = {
         "organization": ORGANIZATION_ID,
         "service": int(service_id),
-        "employee": int(employee_id),  # <-- ДОБАВЛЕНО КРИТИЧЕСКОЕ ПОЛЕ
+        "employee": int(employee_id),
         "client_name": client_name,
         "client_phone_number": client_phone_number,
         "start_time": start_time_str,
+        # 🚨 НОВОЕ: Добавляем Chat ID в payload
+        "client_chat_id": client_chat_id,
     }
 
     logger.debug(f"User {user_id}: Payload for POST: {payload}")
@@ -549,8 +554,13 @@ def clean_phone_number(phone: str) -> str:
 
 
 async def request_client_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Запрашивает имя клиента."""
+    """Запрашивает имя клиента. 🚨 ОБНОВЛЕНО: Сохраняем telegram_chat_id."""
     context.user_data['awaiting_name'] = True
+
+    # 🚨 НОВОЕ: Сохраняем user_id (Chat ID) сразу
+    # Если это callback, используем ID из effective_user
+    context.user_data['telegram_chat_id'] = str(update.effective_user.id)
+
     await update.callback_query.edit_message_text(
         "📝 Введите ваше имя для записи:"
     )
@@ -560,6 +570,9 @@ async def request_client_phone(update: Update, context: ContextTypes.DEFAULT_TYP
     """Запрашивает номер телефона клиента."""
     context.user_data['awaiting_phone'] = True
     context.user_data.pop('awaiting_name', None)
+
+    # Chat ID уже должен быть в context.user_data['telegram_chat_id'],
+    # сохраненный в request_client_name
 
     keyboard = [[KeyboardButton("Поделиться контактом", request_contact=True)]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
@@ -579,6 +592,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Имя клиента для записи
         context.user_data['client_name'] = text
         logger.info(f"User {user_id}: Name stored as '{text}'. Requesting phone.")
+        # Chat ID уже был сохранен в request_client_name, здесь просто продолжаем
         await request_client_phone(update, context)
 
     elif context.user_data.get('awaiting_phone_for_view'):
@@ -593,7 +607,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def handle_contact_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработка ввода контакта через кнопку Telegram."""
+    """Обработка ввода контакта через кнопку Telegram. 🚨 ОБНОВЛЕНО: Сохраняем telegram_chat_id."""
     user_id = update.effective_user.id
     contact = update.message.contact
     phone = clean_phone_number(contact.phone_number)
@@ -603,6 +617,11 @@ async def handle_contact_input(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data['client_phone_number'] = phone
         logger.info(f"User {user_id}: Phone stored as '{phone}' (contact for booking). Finalizing.")
         context.user_data.pop('awaiting_phone', None)
+
+        # 🚨 НОВОЕ: Сохраняем user_id (Chat ID), если контакт отправлен напрямую,
+        # или если он не был сохранен ранее (хотя по логике request_client_name должен был)
+        context.user_data['telegram_chat_id'] = str(user_id)
+
         await finalize_appointment(update, context)
 
     elif context.user_data.get('awaiting_phone_for_view'):
@@ -794,10 +813,12 @@ def main() -> None:
 
     # Обработчики для ввода текста (имя)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
-    # Обработчик для ввода контакта
+
+    # Обработчик для ввода контакта (телефон)
     application.add_handler(MessageHandler(filters.CONTACT, handle_contact_input))
 
-    # Запуск
+    # Запуск бота
+    logger.info("🚀 Бот запущен!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

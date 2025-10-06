@@ -153,6 +153,20 @@ class Appointment(models.Model):
     address = models.CharField(max_length=255, default="",
                                verbose_name="Адрес оказания услуги")  # Добавил поле для адреса
 
+    # Флаг для предотвращения дублирования напоминаний
+    is_client_reminder_sent = models.BooleanField(
+        default=False,
+        verbose_name="Напоминание клиенту отправлено"
+    )
+
+    #  Chat ID клиента
+    client_chat_id = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        verbose_name="Telegram Chat ID клиента"
+    )
+
     class Meta:
         verbose_name = "Запись/Бронирование"
         verbose_name_plural = "Записи/Бронирования"

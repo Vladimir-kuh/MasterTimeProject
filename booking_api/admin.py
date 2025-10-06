@@ -97,11 +97,14 @@ class AppointmentAdmin(admin.ModelAdmin):
         'status',
         'actual_price_display',
         'actual_duration_display',
+        'client_chat_id'
     )
     list_filter = ('organization', 'status', 'employee')
     search_fields = ('client__name', 'employee__name', 'service__name')
     date_hierarchy = 'start_time'
 
+    #  добавить кнопку удаления
+    actions = ['delete_selected']
     fieldsets = (
         (None, {
             'fields': ('organization', 'client', 'employee', 'service', 'address', 'status')

@@ -1,4 +1,4 @@
-# booking_api/serializers.py (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# booking_api/serializers.py
 
 from rest_framework import serializers
 from django.utils import timezone
@@ -63,10 +63,10 @@ class AppointmentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Appointment
-        # Добавьте 'address', если он необходим при создании
+
         fields = [
             'organization', 'employee', 'service',
-            'start_time', 'address', 'client_name', 'client_phone_number'
+            'start_time', 'address', 'client_name', 'client_phone_number', "client_chat_id"
         ]
         # end_time рассчитывается, status по умолчанию PENDING/CONFIRMED, client создается
         read_only_fields = ['end_time', 'status', 'client']
@@ -125,6 +125,8 @@ class AppointmentSerializer(serializers.ModelSerializer):
         client_phone_number = validated_data.pop('client_phone_number')
         service = validated_data.get('service')
 
+        # 🚨 ИЗВЛЕКАЕМ CHAT ID ИЗ ВАЛИДИРОВАННЫХ ДАННЫХ
+        client_chat_id = validated_data.pop('client_chat_id', None)
         try:
             client, created = Client.objects.get_or_create(
                 phone_number=client_phone_number,
@@ -138,6 +140,10 @@ class AppointmentSerializer(serializers.ModelSerializer):
         # Это нужно, чтобы цена и длительность записи не менялись, если изменится услуга
         validated_data['custom_duration'] = service.base_duration
         validated_data['custom_price'] = service.base_price
+
+        # 🚨 ОБНОВЛЯЕМ: ДОБАВЛЯЕМ CHAT ID В ДАННЫЕ ДЛЯ СОЗДАНИЯ ЗАПИСИ
+        if client_chat_id:
+            validated_data['client_chat_id'] = client_chat_id
 
         appointment = Appointment.objects.create(**validated_data)
         return appointment
@@ -164,5 +170,5 @@ class AppointmentDetailSerializer(serializers.ModelSerializer):
             'id', 'organization', 'organization_name', 'employee', 'employee_name',
             'service', 'service_name', 'client', 'client_name',
             'start_time', 'end_time', 'status', 'address',
-            'actual_duration', 'actual_price'  # Новые поля
+            'actual_duration', 'actual_price','client_chat_id'
         ]
