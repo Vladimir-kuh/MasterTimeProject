@@ -6,6 +6,10 @@ from django.utils.translation import gettext_lazy as _
 from datetime import timedelta
 
 
+import logging
+logger = logging.getLogger('booking_debug')
+
+
 # --- Модель 1: Организация (Салон, Шиномонтаж и т.д.) ---
 class Organization(models.Model):
     name = models.CharField(max_length=255, verbose_name="Название организации")
@@ -20,11 +24,10 @@ class Organization(models.Model):
         return self.name
 
 
-# --- Модель 2: Сотрудник/Мастер (ОБНОВЛЕНО) ---
+# --- Модель 2: Сотрудник/Мастер (С МЕТОДОМ РАСЧЕТА РАСПИСАНИЯ) ---
 class Employee(models.Model):
     organization = models.ForeignKey(Organization, on_delete=models.CASCADE, verbose_name="Организация")
     name = models.CharField(max_length=255, verbose_name="Имя Сотрудника/Мастера")
-    # NEW: Поле для привязки Telegram ID мастера
     telegram_chat_id = models.CharField(
         max_length=50,
         blank=True,
@@ -40,31 +43,88 @@ class Employee(models.Model):
     def __str__(self):
         return f"{self.name} ({self.organization.name})"
 
+    def get_working_intervals(self, date):
+        """
+        Возвращает список рабочих интервалов (в минутах от 00:00)
+        для мастера на указанную дату, учитывая шаблон и исключения.
 
-# --- Модель 3: Каталог Услуг (ЗНАЧИТЕЛЬНО ОБНОВЛЕНО) ---
+        Возвращаемый формат: [(start_minutes_1, end_minutes_1), (start_minutes_2, end_minutes_2), ...]
+        """
+
+        # 1. Проверка Исключений (ScheduleException - Высший приоритет)
+        try:
+            exception = self.exceptions.get(date=date)
+
+            # Если это полный выходной
+            if not exception.has_new_hours:
+                return []
+
+            # Если это неполный день (переопределение)
+            base_intervals = [
+                (exception.new_start_minutes, exception.new_end_minutes)
+            ]
+
+        except ScheduleException.DoesNotExist:
+            # 2. Получение Шаблона (EmployeeSchedule - Приоритет по умолчанию)
+            day_of_week = date.weekday()  # Понедельник=0, Воскресенье=6
+            try:
+                schedule = self.employeeschedule_set.get(day_of_week=day_of_week)
+                base_intervals = [
+                    (schedule.start_minutes, schedule.end_minutes)
+                ]
+            except self.employeeschedule_set.model.DoesNotExist:
+                return []
+
+        # 3. Учет Блокировок (TimeBlocker - Вычитание)
+        blockers = self.blocked_times.filter(date=date).order_by('start_minutes')
+
+        final_intervals = []
+        for start, end in base_intervals:
+            current_start = start
+
+            for blocker in blockers:
+                block_start = blocker.start_minutes
+                block_end = blocker.end_minutes
+
+                # Если рабочий интервал начинается ДО блокировки, добавляем свободное время
+                if current_start < block_start:
+                    final_intervals.append((current_start, min(end, block_start)))
+
+                # Сдвигаем текущую точку отсчета за конец блокировки
+                current_start = max(current_start, block_end)
+
+            # Добавляем оставшееся время после всех блокировок
+            if current_start < end:
+                final_intervals.append((current_start, end))
+
+        # Важно: Здесь (или в отдельном сервисе) должна быть логика вычитания
+        # уже существующих записей (Appointment) из final_intervals.
+        logger.warning(f"DEBUG_SCHED: Мастер {self.name}, Дата {date.isoformat()}")
+        logger.warning(f"DEBUG_SCHED: Базовый интервал (до блокировок): {base_intervals}")
+        if blockers.exists():
+            logger.warning(f"DEBUG_SCHED: Блокировки: {blockers.values('start_minutes', 'end_minutes')}")
+        logger.warning(f"DEBUG_SCHED: ФИНАЛЬНЫЕ РАБОЧИЕ ИНТЕРВАЛЫ: {final_intervals}")
+
+        return final_intervals
+
+
+# --- Модель 3: Каталог Услуг ---
 class Service(models.Model):
     organization = models.ForeignKey(Organization, on_delete=models.CASCADE, verbose_name="Организация")
     name = models.CharField(max_length=255, verbose_name="Название услуги (Обязательно)")
-
-    # NEW: Добавлено поле Категория (Необязательно)
     category = models.CharField(max_length=100, blank=True, null=True, verbose_name="Категория")
 
-    # NEW: Базовая Длительность (Обязательно)
     base_duration = models.IntegerField(
         verbose_name="Базовая Длительность (мин)",
         validators=[MinValueValidator(1)],
         help_text="Фактическое время оказания услуги в минутах."
     )
-
-    # NEW: Базовая Цена (Обязательно)
     base_price = models.DecimalField(
         max_digits=10,
         decimal_places=2,
         verbose_name="Базовая Цена (руб./валюта)",
         validators=[MinValueValidator(0)]
     )
-
-    # NEW: Буферное Время (Необязательно)
     buffer_time = models.IntegerField(
         default=0,
         verbose_name="Буферное Время (мин)",
@@ -72,13 +132,9 @@ class Service(models.Model):
         help_text="Время, добавляемое автоматически после услуги (например, на уборку)."
     )
 
-    # NEW: Описание (Необязательно)
     description = models.TextField(blank=True, null=True, verbose_name="Описание для клиента")
-
-    # Статус (Активна/Скрыта)
     is_active = models.BooleanField(default=True, verbose_name="Активна")
 
-    # Сотрудники, оказывающие услугу (оставлено без изменений)
     employees = models.ManyToManyField(
         Employee,
         related_name='services',
@@ -88,7 +144,7 @@ class Service(models.Model):
     class Meta:
         verbose_name = "Услуга (Каталог)"
         verbose_name_plural = "Услуги (Каталог)"
-        unique_together = ('organization', 'name')  # Добавим уникальность внутри организации
+        unique_together = ('organization', 'name')
 
     def __str__(self):
         return f"{self.name} ({self.total_duration} мин, {self.base_price} руб.)"
@@ -99,7 +155,7 @@ class Service(models.Model):
         return self.base_duration + self.buffer_time
 
 
-# --- Модель 4: Клиент (Без изменений) ---
+# --- Модель 4: Клиент ---
 class Client(models.Model):
     name = models.CharField(max_length=255, verbose_name="Имя Клиента")
     phone_number = models.CharField(max_length=20, unique=True, verbose_name="Телефон")
@@ -112,7 +168,7 @@ class Client(models.Model):
         return self.name
 
 
-# --- Модель 5: Запись/Бронирование (ОБНОВЛЕНО) ---
+# --- Модель 5: Запись/Бронирование ---
 class Appointment(models.Model):
     STATUS_CHOICES = [
         ('PENDING', 'Ожидает подтверждения'),
@@ -124,16 +180,11 @@ class Appointment(models.Model):
     organization = models.ForeignKey(Organization, on_delete=models.CASCADE)
     client = models.ForeignKey(Client, on_delete=models.CASCADE)
     employee = models.ForeignKey(Employee, on_delete=models.SET_NULL, null=True, blank=True)
-
-    # Связь с обновленной моделью Service
     service = models.ForeignKey(Service, on_delete=models.PROTECT, verbose_name="Выбранная Услуга")
 
     start_time = models.DateTimeField(verbose_name="Время начала")
-
-    # NEW: Поле end_time будет рассчитываться автоматически, но хранится для фиксации.
     end_time = models.DateTimeField(verbose_name="Время окончания")
 
-    # NEW: Поля для хранения ручных изменений цены/длительности
     custom_duration = models.IntegerField(
         blank=True,
         null=True,
@@ -150,16 +201,12 @@ class Appointment(models.Model):
     )
 
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='PENDING', verbose_name="Статус")
-    address = models.CharField(max_length=255, default="",
-                               verbose_name="Адрес оказания услуги")  # Добавил поле для адреса
+    address = models.CharField(max_length=255, default="", verbose_name="Адрес оказания услуги")
 
-    # Флаг для предотвращения дублирования напоминаний
     is_client_reminder_sent = models.BooleanField(
         default=False,
         verbose_name="Напоминание клиенту отправлено"
     )
-
-    #  Chat ID клиента
     client_chat_id = models.CharField(
         max_length=20,
         null=True,
@@ -170,10 +217,7 @@ class Appointment(models.Model):
     class Meta:
         verbose_name = "Запись/Бронирование"
         verbose_name_plural = "Записи/Бронирования"
-        # Запрет двух записей у одного мастера в одно и то же время
         constraints = [
-            # Уникальность по мастеру и времени начала - может быть спорным из-за буфера,
-            # но в простейшем случае оставляем как было, полагаясь на логику расчета end_time.
             models.UniqueConstraint(fields=['employee', 'start_time'], name='unique_employee_time')
         ]
 
@@ -186,21 +230,20 @@ class Appointment(models.Model):
         return self.custom_duration if self.custom_duration is not None else self.service.total_duration
 
     @property
-    def actual_price(self):
+    def actual_price(self2):
         """Возвращает фактическую цену (кастомную или базовую)."""
-        return self.custom_price if self.custom_price is not None else self.service.base_price
+        return self2.custom_price if self2.custom_price is not None else self2.service.base_price
 
     def save(self, *args, **kwargs):
         """Переопределяем save() для автоматического расчета end_time."""
 
-        # Расчет end_time на основе фактической длительности
         duration_minutes = self.actual_duration
         self.end_time = self.start_time + timedelta(minutes=duration_minutes)
 
         super().save(*args, **kwargs)
 
 
-# --- Модель 6: Рабочее Расписание Мастера (Без изменений) ---
+# --- Модель 6: Рабочее Расписание Мастера (Базовый шаблон) ---
 class EmployeeSchedule(models.Model):
     WEEKDAY_CHOICES = [
         (0, 'Понедельник'),
@@ -215,7 +258,6 @@ class EmployeeSchedule(models.Model):
     employee = models.ForeignKey('Employee', on_delete=models.CASCADE, verbose_name="Сотрудник/Мастер")
     day_of_week = models.IntegerField(choices=WEEKDAY_CHOICES, verbose_name="День недели")
 
-    # Рабочий интервал (в минутах от начала дня)
     start_minutes = models.IntegerField(
         validators=[MinValueValidator(0), MaxValueValidator(1440)],
         verbose_name="Начало работы (минуты от 00:00)"
@@ -232,3 +274,83 @@ class EmployeeSchedule(models.Model):
 
     def __str__(self):
         return f"{self.employee.name} - {self.get_day_of_week_display()}"
+
+
+# --- Модель 7: Исключение Расписания (Переопределение или Выходной) ---
+class ScheduleException(models.Model):
+    employee = models.ForeignKey(
+        'Employee',
+        on_delete=models.CASCADE,
+        related_name='exceptions',
+        verbose_name="Сотрудник/Мастер"
+    )
+    date = models.DateField(
+        verbose_name="Дата исключения"
+    )
+
+    has_new_hours = models.BooleanField(
+        default=False,
+        verbose_name="Переопределить часы работы"
+    )
+
+    new_start_minutes = models.IntegerField(
+        validators=[MinValueValidator(0), MaxValueValidator(1440)],
+        null=True, blank=True,
+        verbose_name="Новое начало работы (минуты от 00:00)"
+    )
+    new_end_minutes = models.IntegerField(
+        validators=[MinValueValidator(0), MaxValueValidator(1440)],
+        null=True, blank=True,
+        verbose_name="Новый конец работы (минуты от 00:00)"
+    )
+
+    class Meta:
+        verbose_name = "Исключение в расписании"
+        verbose_name_plural = "Исключения в расписании"
+        unique_together = ('employee', 'date')
+
+    def __str__(self):
+        if not self.has_new_hours:
+            return f"{self.employee.name} - Выходной ({self.date})"
+
+        start_time_str = f"{self.new_start_minutes // 60:02d}:{(self.new_start_minutes % 60):02d}" if self.new_start_minutes is not None else "N/A"
+        end_time_str = f"{self.new_end_minutes // 60:02d}:{(self.new_end_minutes % 60):02d}" if self.new_end_minutes is not None else "N/A"
+        return f"{self.employee.name} - Смена часов {start_time_str}-{end_time_str} ({self.date})"
+
+
+# --- Модель 8: Блокировка Времени (Перерыв в течение дня) ---
+class TimeBlocker(models.Model):
+    employee = models.ForeignKey(
+        'Employee',
+        on_delete=models.CASCADE,
+        related_name='blocked_times',
+        verbose_name="Сотрудник/Мастер"
+    )
+    date = models.DateField(
+        verbose_name="Дата блокировки"
+    )
+
+    start_minutes = models.IntegerField(
+        validators=[MinValueValidator(0), MaxValueValidator(1440)],
+        verbose_name="Начало блокировки (минуты от 00:00)"
+    )
+    end_minutes = models.IntegerField(
+        validators=[MinValueValidator(0), MaxValueValidator(1440)],
+        verbose_name="Конец блокировки (минуты от 00:00)"
+    )
+
+    reason = models.CharField(
+        max_length=255,
+        blank=True,
+        verbose_name="Причина блокировки (для администрации)"
+    )
+
+    class Meta:
+        verbose_name = "Блокировка Времени"
+        verbose_name_plural = "Блокировки Времени"
+        #index_together = [['employee', 'date']]
+        indexes = [
+            models.Index(fields=['employee', 'date']),
+        ]
+    def __str__(self):
+        return f"Блокировка {self.employee.name} на {self.date}"

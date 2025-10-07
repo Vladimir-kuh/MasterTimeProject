@@ -1,5 +1,3 @@
-# booking_api/views.py
-
 from django.db.models.functions import TruncDate
 from django.db.models import Count, Q
 from django.utils import timezone
@@ -12,16 +10,17 @@ from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework.views import APIView
 
-# Добавляем новые импорты для работы с Telegram API
+# Добавляем новые импорты для работы с Telegram API и сервисом
 from .models import Service, Appointment, Employee, Client, Organization
 from .serializers import (
     ServiceSerializer, AppointmentSerializer,
     AppointmentDetailSerializer, EmployeeSerializer,
-    # Если вы создадите TelegramAppointmentSerializer, используйте его здесь
 )
-from .utils import calculate_available_slots
-from .notifications import send_appointment_confirmation  # Убедитесь, что он использует telegram_utils
-from .telegram_utils import send_telegram_notification  # (для прямого использования в Telegram API)
+# ИМПОРТ НОВОГО СЕРВИСА
+from .services import BookingService
+from .utils import calculate_available_slots  # Эту функцию можно будет удалить, заменив на сервис
+from .notifications import send_appointment_confirmation
+from .telegram_utils import send_telegram_notification
 
 
 # --- НОВОЕ ПРЕДСТАВЛЕНИЕ: Для получения списка мастеров, привязанных к услуге ---
@@ -111,7 +110,6 @@ class ServiceViewSet(viewsets.ReadOnlyModelViewSet):
 
 # --- Представление для работы с записями (с разделением разрешений) ---
 class AppointmentViewSet(viewsets.ModelViewSet):
-    # ... (Оставить код без изменений, он уже обрабатывает создание через DRF)
     queryset = Appointment.objects.all().order_by('-start_time')
 
     def get_serializer_class(self):
@@ -130,55 +128,70 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         appointment = serializer.save()
-        send_appointment_confirmation(appointment)  # В этой функции теперь Telegram-уведомление
+        send_appointment_confirmation(appointment)
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
-    # ... (list_available_slots без изменений)
+    # ОБНОВЛЕННЫЙ ЭНДПОИНТ: GET /api/v1/appointments/available_slots/
     @action(detail=False, methods=['get'], permission_classes=[AllowAny], url_path='available_slots')
     def list_available_slots(self, request):
-        # ... (Код без изменений)
-        organization_id = request.query_params.get('org_id')
+        """
+        Возвращает доступное время для бронирования с учетом плавающих расписаний,
+        блокировок и записей, используя BookingService.
+        """
+        employee_id = request.query_params.get('employee_id')
         service_id = request.query_params.get('service_id')
         date_str = request.query_params.get('date')
-        employee_id = request.query_params.get('employee_id')
 
-        if not all([organization_id, service_id, date_str]):
+        if not all([employee_id, service_id, date_str]):
             return Response(
-                {"error": "Требуются параметры: org_id, service_id, date."},
+                {"error": "Требуются параметры: employee_id, service_id, date."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        available_slots = calculate_available_slots(
-            int(organization_id),
-            int(service_id),
-            date_str,
-            employee_id=int(employee_id) if employee_id else None
-        )
+        try:
+            employee = Employee.objects.get(pk=employee_id)
+            service = Service.objects.get(pk=service_id)
+            booking_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except (Employee.DoesNotExist, Service.DoesNotExist) as e:
+            return Response({"error": f"Объект не найден: {e}"}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError:
+            return Response({"error": "Неверный формат даты. Ожидается YYYY-MM-DD."},
+                            status=status.HTTP_400_BAD_REQUEST)
 
-        if isinstance(available_slots, dict) and 'error' in available_slots:
-            status_code = available_slots.get('status', status.HTTP_400_BAD_REQUEST)
-            return Response(available_slots, status=status_code)
+        # *** Использование BookingService для расчета ***
+        try:
+            booking_service = BookingService(employee, service, booking_date)
+            available_slots = booking_service.get_available_slots()
 
-        return Response(available_slots)
+            # Форматирование объектов datetime в строки ISO для ответа
+            slots_data = [slot.isoformat() for slot in available_slots]
+
+            return Response({
+                "employee_name": employee.name,
+                "date": date_str,
+                "service_total_duration_min": service.total_duration,
+                "available_slots": slots_data
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            # Сюда могут попасть ошибки из логики get_working_intervals или _subtract_intervals
+            return Response({"error": f"Ошибка при расчете слотов: {str(e)}"},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # --- ПРЕДСТАВЛЕНИЕ ДЛЯ TELEGRAM (Создание Записи) ---
-# Используем отдельный APIView для прямого POST-запроса от Telegram-бота
 class TelegramAppointmentCreationView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request, *args, **kwargs):
-        # Нам нужен кастомный десериализатор, чтобы найти или создать Client
-        # Для простоты используем AppointmentSerializer и ищем/создаем Client вручную
-
         data = request.data
         required_fields = ['client_name', 'client_phone', 'address', 'service', 'employee', 'start_time',
                            'organization']
         if not all(field in data for field in required_fields):
             return Response({
-                                'message': 'Отсутствуют обязательные поля: client_name, client_phone, address, service, employee, start_time, organization.'},
-                            status=status.HTTP_400_BAD_REQUEST)
+                'message': 'Отсутствуют обязательные поля: client_name, client_phone, address, service, employee, start_time, organization.'},
+                status=status.HTTP_400_BAD_REQUEST)
 
         try:
             # 1. Находим или создаем Клиента
@@ -196,15 +209,19 @@ class TelegramAppointmentCreationView(APIView):
             organization = Organization.objects.get(id=data['organization'])
 
             start_time_unaware = datetime.strptime(data['start_time'], '%Y-%m-%d %H:%M')
-            start_time = timezone.make_aware(start_time_unaware)
+            # Важно: используем timezone.make_aware, чтобы соответствовать DateTimeField
+            start_time = timezone.make_aware(start_time_unaware, timezone.get_current_timezone())
 
             # 3. Расчет времени окончания и проверка конфликтов
             total_duration = service.total_duration
             end_time = start_time + timedelta(minutes=total_duration)
 
+            # Проверка конфликта: ищем записи, которые пересекаются с новым интервалом
             conflict = Appointment.objects.filter(
                 employee=employee,
+                # Запись заканчивается после начала новой
                 end_time__gt=start_time,
+                # Запись начинается до окончания новой
                 start_time__lt=end_time
             ).exists()
 
@@ -220,10 +237,17 @@ class TelegramAppointmentCreationView(APIView):
                 service=service,
                 address=data['address'],
                 start_time=start_time,
-                # end_time рассчитывается в save(), но мы можем установить его здесь
+                # end_time рассчитывается в save(), но можно установить и здесь для чистоты
+                # Лучше дать save() делать свое дело, но для TelegramAPI явно указываем.
                 end_time=end_time,
-                status='CONFIRMED'  # Считаем, что бот подтверждает запись
+                status='CONFIRMED',  # Считаем, что бот подтверждает запись
+                # Также можно добавить client_chat_id, если он приходит в запросе:
+                client_chat_id=data.get('client_chat_id')
             )
+
+            # Важно: Сразу после создания запускаем save(), чтобы end_time обновился
+            # на основе custom_duration, если он был бы передан.
+            # В данном случае, Appointment.save() уже был переопределен для расчета end_time.
 
             # 5. Мгновенное оповещение Мастера
             send_appointment_confirmation(new_appointment)

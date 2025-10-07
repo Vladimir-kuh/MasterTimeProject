@@ -8,14 +8,15 @@ from telegram.ext import (
     Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 )
 from dotenv import load_dotenv
-from datetime import date, timedelta  # 👈 Добавлен timedelta
+from datetime import date, timedelta  # 👈 Оставляем timedelta
 import calendar
 import re
+from typing import List, Dict, Any, Union  # 👈 Добавлен импорт для type hinting
 
 # --- 0. Настройка логирования ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ def refresh_access_token() -> bool:
         return False
 
 
-def make_api_request(method: str, url: str, **kwargs) -> requests.Response | None:
+def make_api_request(method: str, url: str, **kwargs) -> Union[requests.Response, None]:
     """Универсальный обработчик запросов с логикой обновления токена."""
     global GLOBAL_TOKENS
     logger.debug(f"API Запрос: {method} {url}, Параметры: {kwargs.get('params', 'Нет')}")
@@ -133,25 +134,26 @@ def make_api_request(method: str, url: str, **kwargs) -> requests.Response | Non
 def fetch_available_days(employee_id: str, year: int, month: int, service_id: str) -> set[str]:
     """
     Запрашивает у API доступность, делая отдельный запрос для каждого дня месяца,
-    начиная с сегодняшнего дня, чтобы обойти ограничение API, требующего 'date'.
-
-    :return: Множество строк дат (YYYY-MM-DD), на которые есть слоты.
+    начиная с сегодняшнего дня.
     """
-    first_day = date(year, month, 1)
+    first_day_of_month = date(year, month, 1)
     _, last_day_num = calendar.monthrange(year, month)
-    last_day = date(year, month, last_day_num)
+    last_day_of_month = date(year, month, last_day_num)
     today = date.today()
 
     available_days = set()
 
-    # Начинаем с первого дня месяца ИЛИ сегодняшнего дня (что позже)
-    current_day = max(first_day, today)
+    # Начинаем цикл с сегодняшнего дня, если месяц - текущий, иначе - с 1-го числа
+    if first_day_of_month.month == today.month and first_day_of_month.year == today.year:
+        current_day = today
+    else:
+        current_day = first_day_of_month
 
     logger.info(f"Начинаю пошаговый запрос доступности для мастера {employee_id} ({year}-{month})...")
 
-    while current_day <= last_day:
+    while current_day <= last_day_of_month:
+
         if current_day.month != month:
-            # Дни, которые относятся к другому месяцу (например, если current_day был max(first_day, today))
             current_day += timedelta(days=1)
             continue
 
@@ -161,34 +163,46 @@ def fetch_available_days(employee_id: str, year: int, month: int, service_id: st
             'org_id': ORGANIZATION_ID,
             'employee_id': employee_id,
             'service_id': service_id,
-            'date': date_str,  # 👈 Исправлено: теперь передаем одиночный 'date'
+            'date': date_str,
         }
 
-        # logger.debug(f"Проверка дня: {date_str}")
         response = make_api_request('GET', SLOTS_URL, params=params)
 
-        if response is None or not response.ok:
-            # В случае ошибки, логируем и переходим к следующему дню
-            if response is None:
-                logger.error(f"API запрос для дня {date_str} не удался (Ошибка токена/подключения).")
-            else:
-                # Логируем текст ответа 400, чтобы видеть, что API требует 'date'
-                logger.debug(
-                    f"API запрос для дня {date_str} не удался (Status {response.status_code}). Response: {response.text}")
+        if response is None:
+            logger.error(f"API запрос для дня {date_str} не удался (Ошибка токена/подключения).")
+            current_day += timedelta(days=1)
+            continue
 
+        # Мы НЕ используем response.raise_for_status() здесь,
+        # так как даже 404/400 может быть полезен для отладки.
+
+        if not response.ok:
+            logger.error(
+                f"❌ API запрос для дня {date_str} вернул ошибку: {response.status_code}. Ответ: {response.text[:100]}..."
+            )
             current_day += timedelta(days=1)
             continue
 
         try:
             slots_data = response.json()
 
-            # Если слоты есть (список не пуст), то день доступен
+            # Логируем фактическое количество байт, чтобы сравнить с логами Django
+            logger.debug(f"API Response Length for {date_str}: {len(response.content)} bytes.")
+
+            # Если API вернул непустой список (есть свободные слоты), то день доступен.
             if isinstance(slots_data, list) and len(slots_data) > 0:
                 available_days.add(date_str)
-                logger.debug(f"✅ Найдены слоты на {date_str}")
+                logger.info(f"✅ Найдены слоты на {date_str}. (Кол-во: {len(slots_data)})")
+            else:
+                # Этот лог поймает дни с 200 140 байт, которые мы видели в логах Django
+                logger.debug(f"❌ Слотов на {date_str} не найдено. Список слотов пуст.")
+
+        except requests.exceptions.JSONDecodeError as e:
+            # ЛОВИМ ОШИБКИ ДЕКОДИРОВАНИЯ JSON
+            logger.error(f"🔴 ОШИБКА ДЕКОДИРОВАНИЯ JSON для {date_str}: {e}. Ответ: {response.text[:100]}...")
 
         except Exception as e:
-            logger.error(f"Ошибка обработки JSON ответа для {date_str}: {e}")
+            logger.error(f"🔴 Неизвестная ошибка обработки ответа для {date_str}: {e}. Ответ: {response.text[:100]}...")
 
         current_day += timedelta(days=1)
 
@@ -200,7 +214,7 @@ def fetch_available_days(employee_id: str, year: int, month: int, service_id: st
 # 🆕 НАВИГАЦИОННЫЕ КНОПКИ
 # -----------------------------------------------------------
 
-def get_navigation_keyboard(back_to_data: str = None) -> list[list[InlineKeyboardButton]]:
+def get_navigation_keyboard(back_to_data: str = None) -> List[List[InlineKeyboardButton]]:
     """
     Создает ряд с кнопками навигации.
     """
@@ -388,18 +402,28 @@ def create_calendar(year: int, month: int, service_id: str, available_days: set[
     """
     logger.info(f"Генерация календаря: {calendar.month_name[month]} {year}. Доступно дней: {len(available_days)}")
 
+    # Устанавливаем локаль для корректного отображения названия месяца
+    try:
+        import locale
+        locale.setlocale(locale.LC_ALL, 'ru_RU.UTF-8')
+        month_name = calendar.month_name[month].capitalize()
+    except:
+        month_name = calendar.month_name[month]
+
     header = [
         [
             InlineKeyboardButton("⬅️", callback_data=f'CALEND_PREV_{year}_{month}_{service_id}'),
-            InlineKeyboardButton(f"{calendar.month_name[month]} {year}", callback_data='IGNORE'),
+            InlineKeyboardButton(f"{month_name} {year}", callback_data='IGNORE'),
             InlineKeyboardButton("➡️", callback_data=f'CALEND_NEXT_{year}_{month}_{service_id}'),
         ]
     ]
+    # Используем русские названия дней недели
     week_days = [InlineKeyboardButton(day, callback_data='IGNORE') for day in
                  ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]]
     keyboard = [week_days]
 
     today = date.today()
+    # Начинаем неделю с понедельника (0)
     month_calendar = calendar.Calendar(0).monthdatescalendar(year, month)
 
     for week in month_calendar:
@@ -410,11 +434,14 @@ def create_calendar(year: int, month: int, service_id: str, available_days: set[
             if day.month != month:
                 row.append(InlineKeyboardButton(" ", callback_data='IGNORE'))
             elif day < today:
+                # В календаре показываем, что прошлые дни недоступны
                 row.append(InlineKeyboardButton("❌", callback_data='IGNORE'))
             elif date_str in available_days:
+                # Доступный день, найденный через API
                 callback_data = f'CALEND_DAY_{date_str}'
                 row.append(InlineKeyboardButton(str(day.day), callback_data=callback_data))
             else:
+                # Рабочий день, но без свободных слотов (включая выходные)
                 row.append(InlineKeyboardButton("⚫", callback_data='IGNORE_DISABLED_DAY'))
         keyboard.append(row)
 
@@ -452,7 +479,7 @@ async def show_calendar_command(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         await update.effective_message.reply_text(text=message_text)
 
-    # 👈 Теперь эта функция итерируется по дням
+    # Запрашиваем доступность у API
     available_days = fetch_available_days(current_employee_id, current_year, current_month, current_service_id)
 
     # Создаем клавиатуру с учетом доступности
@@ -487,7 +514,7 @@ async def show_available_slots(update: Update, context: ContextTypes.DEFAULT_TYP
     params = {
         'org_id': ORGANIZATION_ID,
         'service_id': service_id,
-        'date': selected_date,  # 👈 Здесь 'date' используется корректно
+        'date': selected_date,
         'employee_id': employee_id
     }
 
@@ -511,8 +538,10 @@ async def show_available_slots(update: Update, context: ContextTypes.DEFAULT_TYP
     filtered_slots = []
 
     for slot_detail in available_slots:
+        # Проверяем, что это словарь и содержит ключ 'time'
         if isinstance(slot_detail, dict) and 'time' in slot_detail:
             try:
+                # Преобразование ISO-формата с 'Z' в корректный datetime объект
                 dt_object = datetime.datetime.fromisoformat(slot_detail['time'].replace('Z', '+00:00'))
                 time_str = dt_object.strftime('%H:%M')
                 filtered_slots.append(time_str)
@@ -565,7 +594,10 @@ async def finalize_appointment(update: Update, context: ContextTypes.DEFAULT_TYP
 
     client_chat_id = context.user_data.get('telegram_chat_id')
 
-    start_time_str = f"{selected_date}T{selected_slot}:00"
+    # Время должно быть в формате ISO 8601 с информацией о часовом поясе
+    # Поскольку Django API возвращает время в UTC, мы должны отправить в UTC или с TZ.
+    # Простейший способ — добавить 'Z' (Zulu time, UTC)
+    start_time_str = f"{selected_date}T{selected_slot}:00Z"
 
     if not all([client_name, client_phone_number, service_id, employee_id, start_time_str, client_chat_id]):
         logger.error(f"User {user_id}: Finalization failed due to missing data: {context.user_data}")
@@ -796,151 +828,143 @@ async def cancel_appointment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"User {user_id}: Appointment {app_id} cancelled.")
 
     except requests.exceptions.RequestException as e:
-        logger.error(f"User {user_id}: Error cancelling appointment {app_id}: {e}")
-        await query.edit_message_text("❌ Ошибка при отмене записи. Попробуйте позже.")
+        logger.error(f"User {user_id}: RequestException during cancellation: {e}")
+        await query.edit_message_text("❌ Ошибка связи с сервером при отмене записи. Попробуйте позже.")
 
 
 # -----------------------------------------------------------
-# 7. Обработчик нажатий на кнопки
+# 7. Обработка Callback-запросов
 # -----------------------------------------------------------
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Общий обработчик для всех inline-кнопок."""
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Основной обработчик всех Inline-кнопок."""
     query = update.callback_query
     await query.answer()
     data = query.data
     user_id = update.effective_user.id
+
     logger.info(f"User {user_id} pressed button: {data}")
 
-    # 0. Игнорирование
-    if data in ['IGNORE', 'IGNORE_DISABLED_DAY']:
-        if data == 'IGNORE_DISABLED_DAY':
-            await query.answer("На эту дату нет свободных слотов. Выберите другой день.", show_alert=False)
-        return
-
-    # 1. Навигация в Главное меню
+    # --- Главное меню и начало записи ---
     if data == 'MAIN_MENU':
-        context.user_data.clear()
         await start_command(update, context)
-
-    # 2. Начало/Возврат к выбору услуги
     elif data == 'start_booking':
-        context.user_data.pop('selected_service_id', None)
-        context.user_data.pop('selected_employee_id', None)
-        context.user_data.pop('calendar_year', None)
-        context.user_data.pop('calendar_month', None)
         await services_command(update, context)
+    elif data == 'view_appointments':
+        await my_appointments_command(update, context)
 
-    # 3. Выбор услуги (SERVICE_ID)
+    # --- Услуги (service_) ---
     elif data.startswith('service_'):
         service_id = data.split('_')[1]
         context.user_data['selected_service_id'] = service_id
-        await show_employees_for_service(update, context)
-
-    # 4. Возврат к выбору мастера
-    elif data == 'BACK_TO_EMPLOYEES':
+        # Очищаем все последующие шаги при смене услуги
         context.user_data.pop('selected_employee_id', None)
+        context.user_data.pop('selected_date', None)
+        context.user_data.pop('selected_slot', None)
         await show_employees_for_service(update, context)
 
-    # 5. Выбор мастера (EMPLOYEE_ID)
+    # --- Мастера (employee_) ---
     elif data.startswith('employee_'):
         employee_id = data.split('_')[1]
         context.user_data['selected_employee_id'] = employee_id
+        # Очищаем дату/слот при смене мастера
+        context.user_data.pop('selected_date', None)
+        context.user_data.pop('selected_slot', None)
 
-        context.user_data.pop('calendar_year', None)
-        context.user_data.pop('calendar_month', None)
+        # Сбрасываем календарь на текущий месяц
+        today = date.today()
+        context.user_data['calendar_year'] = today.year
+        context.user_data['calendar_month'] = today.month
 
         await show_calendar_command(update, context)
 
-    # 6. Календарь: Навигация
+    # --- Календарь (CALEND_) ---
     elif data.startswith('CALEND_PREV_') or data.startswith('CALEND_NEXT_'):
         parts = data.split('_')
-        direction = parts[1]
-        current_year = int(parts[2])
-        current_month = int(parts[3])
+        action = parts[1]
+        year = int(parts[2])
+        month = int(parts[3])
+        service_id = parts[4]
 
-        if direction == 'NEXT':
-            if current_month == 12:
-                next_date = datetime.date(current_year + 1, 1, 1)
-            else:
-                next_date = datetime.date(current_year, current_month + 1, 1)
-        else:
-            if current_month == 1:
-                next_date = datetime.date(current_year - 1, 12, 1)
-            else:
-                next_date = datetime.date(current_year, current_month - 1, 1)
+        new_year, new_month = year, month
 
-        today = datetime.date.today()
-        if next_date.year < today.year or (next_date.year == today.year and next_date.month < today.month):
-            await query.answer("Нельзя выбрать прошедший месяц.", show_alert=True)
-            return
+        if action == 'PREV':
+            new_month -= 1
+            if new_month < 1:
+                new_month = 12
+                new_year -= 1
+        elif action == 'NEXT':
+            new_month += 1
+            if new_month > 12:
+                new_month = 1
+                new_year += 1
 
-        context.user_data['calendar_year'] = next_date.year
-        context.user_data['calendar_month'] = next_date.month
+        context.user_data['calendar_year'] = new_year
+        context.user_data['calendar_month'] = new_month
 
+        # Перезапуск календаря для нового месяца
         await show_calendar_command(update, context)
 
-    # 7. Выбор дня в календаре (CALEND_DAY_YYYY-MM-DD)
     elif data.startswith('CALEND_DAY_'):
         selected_date_str = data.split('_')[2]
         context.user_data['selected_date'] = selected_date_str
+        context.user_data.pop('selected_slot', None)
         await show_available_slots(update, context)
 
-    # 8. Возврат к выбору даты (Календарю)
-    elif data == 'BACK_TO_CALENDAR':
-        context.user_data.pop('selected_date', None)
-        await show_calendar_command(update, context)
-
-    # 9. Выбор слота (SLOT_HH:MM)
     elif data.startswith('SLOT_'):
-        selected_slot = data.split('_')[1]
-        context.user_data['selected_slot'] = selected_slot
+        selected_slot_time = data.split('_')[1]
+        context.user_data['selected_slot'] = selected_slot_time
         await request_client_name(update, context)
 
-    # 10. Возврат к выбору слота
+    # --- Навигация "Назад" ---
+    elif data == 'BACK_TO_EMPLOYEES':
+        await show_employees_for_service(update, context)
+    elif data == 'BACK_TO_CALENDAR':
+        await show_calendar_command(update, context)
     elif data == 'BACK_TO_SLOTS':
-        context.user_data.pop('client_name', None)
-        context.user_data.pop('awaiting_name', None)
+        # Перезапуск слотов (поскольку имя/телефон еще не введены)
         await show_available_slots(update, context)
 
-    # 11. Просмотр записей
-    elif data == 'view_appointments':
-        context.user_data.clear()
-        await my_appointments_command(update, context)
-
-    # 12. Отмена записи
+    # --- Отмена записи ---
     elif data.startswith('CANCEL_'):
         await cancel_appointment(update, context)
 
+    # --- Игнорирование ---
+    elif data in ['IGNORE', 'IGNORE_DISABLED_DAY']:
+        pass
     else:
-        await query.edit_message_text(f"Неизвестная команда: {data}")
+        logger.warning(f"Unknown callback data received: {data}")
+        await query.edit_message_text("Неизвестная команда. Начните с /start.")
 
 
 # -----------------------------------------------------------
-# 8. Запуск бота
+# 8. Точка входа
 # -----------------------------------------------------------
 
 def main() -> None:
     """Запуск бота."""
+
+    # 1. Получение токенов
     if not obtain_initial_tokens():
-        logger.fatal("Бот не может запуститься без начальных токенов. Выход.")
+        logger.critical("Бот не может запуститься без действительного Access Token.")
         return
 
+    # 2. Создание приложения
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    logger.info("🤖 Бот запущен и готов к работе...")
 
-    # Обработчики команд
+    # --- Команды ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("services", services_command))
-    application.add_handler(CommandHandler("my_appointments", my_appointments_command))
 
-    # Обработчики callback-запросов (Inline-кнопки)
-    application.add_handler(CallbackQueryHandler(button_handler))
+    # --- Callbacks (Inline-кнопки) ---
+    application.add_handler(CallbackQueryHandler(handle_callback_query))
 
-    # Обработчики сообщений
+    # --- Обработка ввода (текст или контакт) ---
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
     application.add_handler(MessageHandler(filters.CONTACT, handle_contact_input))
 
-    logger.info("🤖 Бот запущен и готов к работе...")
+    # 3. Запуск
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
